@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 font-sans;
+  }
+}
+
+/* Custom Design System Components */
+.card-base {
+  @apply bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-sm transition-all duration-200 hover:border-slate-700;
+}
+
+.btn-primary {
+  @apply bg-blue-600 hover:bg-blue-500 text-white font-medium px-4 py-2 rounded-lg transition-colors duration-150 inline-flex items-center justify-center gap-2 text-sm disabled:opacity-50 disabled:pointer-events-none shadow-sm;
+}
+
+.btn-secondary {
+  @apply bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium px-4 py-2 rounded-lg transition-colors duration-150 inline-flex items-center justify-center gap-2 text-sm disabled:opacity-50 disabled:pointer-events-none;
+}
+
+.btn-outline {
+  @apply border border-slate-700 hover:bg-slate-800/80 text-slate-300 font-medium px-3.5 py-1.5 rounded-lg transition-colors duration-150 inline-flex items-center justify-center gap-2 text-sm;
+}
+
+.badge-blue {
+  @apply bg-blue-950/80 text-blue-400 border border-blue-800/50 text-xs px-2.5 py-0.5 rounded-full font-medium inline-flex items-center gap-1;
+}
+
+.badge-green {
+  @apply bg-emerald-950/80 text-emerald-400 border border-emerald-800/50 text-xs px-2.5 py-0.5 rounded-full font-medium inline-flex items-center gap-1;
+}
+
+.badge-amber {
+  @apply bg-amber-950/80 text-amber-400 border border-amber-800/50 text-xs px-2.5 py-0.5 rounded-full font-medium inline-flex items-center gap-1;
+}
+
+.badge-slate {
+  @apply bg-slate-800 text-slate-300 border border-slate-700 text-xs px-2.5 py-0.5 rounded-full font-medium inline-flex items-center gap-1;
+}
+
+.badge-rose {
+  @apply bg-rose-950/80 text-rose-400 border border-rose-800/50 text-xs px-2.5 py-0.5 rounded-full font-medium inline-flex items-center gap-1;
+}
+
+.input-field {
+  @apply bg-slate-900 border border-slate-800 text-slate-100 placeholder-slate-500 rounded-lg px-3.5 py-2 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors w-full;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
