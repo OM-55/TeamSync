@@ -1,597 +1,484 @@
-import sqlite3 from 'sqlite3';
 import bcrypt from 'bcryptjs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { supabase, checkSupabaseConnection } from './supabaseClient.js';
+import { supabase } from './supabaseClient.js';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// In-Memory Persistent Data Store for Serverless Environment (Zero native C++ dependency)
+const usersStore = new Map(); // id -> user, email -> user
+const profilesStore = new Map(); // user_id -> profile
+const collegesStore = new Map(); // id -> college
+const opportunitiesStore = new Map(); // id -> opp
+const rulesStore = new Map(); // opportunity_id -> rules
+const teamsStore = new Map(); // id -> team
+const membersStore = new Map(); // team_id -> [members]
+const requestsStore = new Map(); // id -> request
+const invitationsStore = new Map(); // id -> invitation
+const projectsStore = new Map(); // id -> project
+const notificationsStore = new Map(); // user_id -> [notifications]
+const messagesStore = new Map(); // team_id -> [messages]
 
-const isVercel = Boolean(process.env.VERCEL);
-const dbPath = isVercel ? '/tmp/teamsync.db' : path.resolve(__dirname, '../teamsync.db');
+let autoIncrementId = 100;
 
-const verboseSqlite = sqlite3.verbose();
-const db = new verboseSqlite.Database(dbPath);
-
-// Global memory persistence maps for Vercel serverless function lifecycle
-const memoryUsers = new Map();
-const memoryProfiles = new Map();
-
-export const query = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) resolve([]);
-      else resolve(rows || []);
-    });
-  });
-};
-
-export const run = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) resolve({ lastID: Date.now(), changes: 1 });
-      else resolve({ lastID: this.lastID, changes: this.changes });
-    });
-  });
-};
-
-export const get = async (sql, params = []) => {
-  // Check memory persistence for User queries by Email
-  if (sql.includes('FROM users WHERE LOWER(email) = LOWER(?)')) {
-    const emailKey = String(params[0]).toLowerCase().trim();
-    if (memoryUsers.has(emailKey)) {
-      return memoryUsers.get(emailKey);
+export async function query(sql, params = []) {
+  try {
+    if (sql.includes('FROM colleges')) {
+      const list = Array.from(collegesStore.values());
+      if (params[0]) {
+        const q = String(params[0]).replace(/%/g, '').toLowerCase();
+        return list.filter(c => c.name.toLowerCase().includes(q));
+      }
+      return list;
     }
-  }
 
-  // Check memory persistence for User queries by ID
-  if (sql.includes('FROM users WHERE id =')) {
-    const userId = parseInt(params[0]);
-    for (const u of memoryUsers.values()) {
-      if (u.id === userId) return u;
+    if (sql.includes('FROM profiles')) {
+      return Array.from(profilesStore.values());
     }
-  }
 
-  // Check memory persistence for Profile queries by user_id
-  if (sql.includes('FROM profiles WHERE user_id =')) {
-    const userId = parseInt(params[0]);
-    if (memoryProfiles.has(userId)) {
-      return memoryProfiles.get(userId);
+    if (sql.includes('FROM opportunities')) {
+      let list = Array.from(opportunitiesStore.values());
+      if (sql.includes('status = ?')) {
+        list = list.filter(o => o.status === params[0]);
+      } else if (sql.includes("status != 'Draft'")) {
+        list = list.filter(o => o.status !== 'Draft');
+      }
+      return list;
     }
-  }
 
-  return new Promise((resolve) => {
-    db.get(sql, params, (err, row) => {
-      if (err) resolve(null);
-      else resolve(row || null);
-    });
-  });
-};
+    if (sql.includes('FROM teams')) {
+      let list = Array.from(teamsStore.values());
+      if (params[0] && sql.includes('purpose = ?')) {
+        list = list.filter(t => t.purpose === params[0]);
+      }
+      return list;
+    }
+
+    if (sql.includes('FROM team_members')) {
+      const teamId = parseInt(params[0]);
+      return membersStore.get(teamId) || [];
+    }
+
+    if (sql.includes('FROM join_requests')) {
+      const teamId = parseInt(params[0]);
+      const list = Array.from(requestsStore.values()).filter(r => r.team_id === teamId);
+      return list;
+    }
+
+    if (sql.includes('FROM invitations')) {
+      const teamId = parseInt(params[0]);
+      const list = Array.from(invitationsStore.values()).filter(i => i.team_id === teamId);
+      return list;
+    }
+
+    if (sql.includes('FROM notifications')) {
+      const userId = parseInt(params[0]);
+      const list = notificationsStore.get(userId) || [];
+      return list;
+    }
+
+    if (sql.includes('FROM projects')) {
+      return Array.from(projectsStore.values());
+    }
+
+    if (sql.includes('FROM team_messages')) {
+      const teamId = parseInt(params[0]);
+      return messagesStore.get(teamId) || [];
+    }
+
+    if (sql.includes('FROM users')) {
+      const usersList = [];
+      for (const [key, val] of usersStore.entries()) {
+        if (typeof key === 'number') usersList.push(val);
+      }
+      return usersList;
+    }
+
+    return [];
+  } catch (err) {
+    console.error('Query error:', err);
+    return [];
+  }
+}
+
+export async function get(sql, params = []) {
+  try {
+    if (sql.includes('COUNT(*) as count FROM colleges')) {
+      return { count: collegesStore.size };
+    }
+    if (sql.includes('COUNT(*) as count FROM users')) {
+      let count = 0;
+      for (const key of usersStore.keys()) {
+        if (typeof key === 'number') count++;
+      }
+      return { count };
+    }
+    if (sql.includes('COUNT(*) as count FROM teams')) {
+      return { count: teamsStore.size };
+    }
+    if (sql.includes('COUNT(*) as count FROM opportunities')) {
+      return { count: opportunitiesStore.size };
+    }
+    if (sql.includes('COUNT(*) as count FROM join_requests')) {
+      return { count: requestsStore.size };
+    }
+
+    if (sql.includes('FROM users WHERE LOWER(email) = LOWER(?)')) {
+      const email = String(params[0]).toLowerCase().trim();
+      return usersStore.get(email) || null;
+    }
+
+    if (sql.includes('FROM users WHERE id =')) {
+      const id = parseInt(params[0]);
+      return usersStore.get(id) || null;
+    }
+
+    if (sql.includes('FROM profiles WHERE user_id =')) {
+      const userId = parseInt(params[0]);
+      return profilesStore.get(userId) || null;
+    }
+
+    if (sql.includes('FROM opportunities WHERE id =')) {
+      const id = parseInt(params[0]);
+      return opportunitiesStore.get(id) || null;
+    }
+
+    if (sql.includes('FROM opportunities WHERE slug =')) {
+      const slug = String(params[0]);
+      for (const opp of opportunitiesStore.values()) {
+        if (opp.slug === slug) return opp;
+      }
+      return null;
+    }
+
+    if (sql.includes('FROM opportunity_rules WHERE opportunity_id =')) {
+      const oppId = parseInt(params[0]);
+      return rulesStore.get(oppId) || null;
+    }
+
+    if (sql.includes('FROM teams WHERE id =')) {
+      const id = parseInt(params[0]);
+      return teamsStore.get(id) || null;
+    }
+
+    if (sql.includes('FROM team_members WHERE team_id = ? AND user_id = ?')) {
+      const teamId = parseInt(params[0]);
+      const userId = parseInt(params[1]);
+      const members = membersStore.get(teamId) || [];
+      return members.find(m => m.user_id === userId) || null;
+    }
+
+    if (sql.includes('FROM join_requests WHERE team_id = ? AND applicant_id = ?')) {
+      const teamId = parseInt(params[0]);
+      const applicantId = parseInt(params[1]);
+      for (const r of requestsStore.values()) {
+        if (r.team_id === teamId && r.applicant_id === applicantId && r.status === 'Pending') {
+          return r;
+        }
+      }
+      return null;
+    }
+
+    if (sql.includes('FROM join_requests WHERE id = ?')) {
+      const id = parseInt(params[0]);
+      return requestsStore.get(id) || null;
+    }
+
+    if (sql.includes('FROM invitations WHERE id = ?')) {
+      const id = parseInt(params[0]);
+      return invitationsStore.get(id) || null;
+    }
+
+    return null;
+  } catch (err) {
+    console.error('Get error:', err);
+    return null;
+  }
+}
+
+export async function run(sql, params = []) {
+  try {
+    autoIncrementId++;
+    const newId = autoIncrementId;
+
+    if (sql.includes('INSERT INTO users')) {
+      const [email, password_hash, role, onboarded] = params;
+      const cleanEmail = String(email).toLowerCase().trim();
+      const newUser = { id: newId, email: cleanEmail, password_hash, role: role || 'STUDENT', onboarded: onboarded || 0, created_at: new Date().toISOString() };
+      usersStore.set(newId, newUser);
+      usersStore.set(cleanEmail, newUser);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('UPDATE users SET onboarded = 1')) {
+      const userId = parseInt(params[0]);
+      const u = usersStore.get(userId);
+      if (u) {
+        u.onboarded = 1;
+        usersStore.set(userId, u);
+        if (u.email) usersStore.set(u.email.toLowerCase(), u);
+      }
+      return { lastID: userId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO profiles') || sql.includes('INSERT OR IGNORE INTO profiles')) {
+      const [user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams, github_url, linkedin_url] = params;
+      const profileObj = {
+        id: newId,
+        user_id: parseInt(user_id),
+        full_name: full_name || '',
+        college: college || '',
+        year_of_study: year_of_study || '1st Year',
+        branch: branch || 'Computer Science',
+        bio: bio || '',
+        skills: skills || '[]',
+        interests: interests || '[]',
+        is_open_to_teams: is_open_to_teams !== undefined ? is_open_to_teams : 1,
+        github_url: github_url || '',
+        linkedin_url: linkedin_url || '',
+        created_at: new Date().toISOString()
+      };
+      profilesStore.set(parseInt(user_id), profileObj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('UPDATE profiles SET')) {
+      const userId = parseInt(params[params.length - 1]);
+      const p = profilesStore.get(userId) || { id: newId, user_id: userId };
+      if (params[0]) p.full_name = params[0];
+      if (params[1]) p.college = params[1];
+      if (params[2]) p.year_of_study = params[2];
+      if (params[3]) p.branch = params[3];
+      if (params[4]) p.bio = params[4];
+      if (params[5]) p.skills = params[5];
+      if (params[6]) p.interests = params[6];
+      if (params[7] !== null && params[7] !== undefined) p.is_open_to_teams = params[7];
+      profilesStore.set(userId, p);
+      return { lastID: userId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO colleges')) {
+      collegesStore.set(newId, { id: newId, name: params[0] });
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO opportunities')) {
+      const [title, slug, organizer, short_description, description, type, status, location, start_date, end_date, participation_mode, created_by] = params;
+      const opp = { id: newId, title, slug, organizer, short_description, description, type, status, location, start_date, end_date, participation_mode, created_by, created_at: new Date().toISOString() };
+      opportunitiesStore.set(newId, opp);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO opportunity_rules')) {
+      const [opportunity_id, min_team_size, max_team_size, exact_team_size, composition_rules] = params;
+      const ruleObj = { id: newId, opportunity_id: parseInt(opportunity_id), min_team_size, max_team_size, exact_team_size, composition_rules };
+      rulesStore.set(parseInt(opportunity_id), ruleObj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO teams')) {
+      const [name, purpose, opportunity_id, project_name, project_description, required_skills, required_roles, leader_id, github_link, figma_link, demo_link] = params;
+      const teamObj = {
+        id: newId,
+        name,
+        purpose,
+        opportunity_id: opportunity_id ? parseInt(opportunity_id) : null,
+        project_name,
+        project_description: project_description || '',
+        required_skills: required_skills || '[]',
+        required_roles: required_roles || '[]',
+        leader_id: parseInt(leader_id),
+        status: 'Recruiting',
+        github_link: github_link || '',
+        figma_link: figma_link || '',
+        demo_link: demo_link || '',
+        created_at: new Date().toISOString()
+      };
+      teamsStore.set(newId, teamObj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO team_members') || sql.includes('INSERT OR IGNORE INTO team_members')) {
+      const [team_id, user_id, role_title] = params;
+      const tId = parseInt(team_id);
+      const uId = parseInt(user_id);
+      const profile = profilesStore.get(uId) || { full_name: 'Member', college: 'College', year_of_study: '1st Year', branch: 'CS' };
+
+      const mList = membersStore.get(tId) || [];
+      if (!mList.some(m => m.user_id === uId)) {
+        mList.push({
+          membership_id: newId,
+          team_id: tId,
+          user_id: uId,
+          role_title: role_title || 'Member',
+          full_name: profile.full_name,
+          college: profile.college,
+          year_of_study: profile.year_of_study,
+          branch: profile.branch,
+          joined_at: new Date().toISOString()
+        });
+        membersStore.set(tId, mList);
+      }
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO join_requests')) {
+      const [team_id, applicant_id, message, status] = params;
+      const reqObj = { id: newId, team_id: parseInt(team_id), applicant_id: parseInt(applicant_id), message: message || '', status: status || 'Pending', created_at: new Date().toISOString() };
+      requestsStore.set(newId, reqObj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('UPDATE join_requests SET status')) {
+      const requestId = parseInt(params[params.length - 1]);
+      const req = requestsStore.get(requestId);
+      if (req) {
+        req.status = params[0];
+        requestsStore.set(requestId, req);
+      }
+      return { lastID: requestId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO invitations')) {
+      const [team_id, student_id, invited_by, role_title, status] = params;
+      const invObj = { id: newId, team_id: parseInt(team_id), student_id: parseInt(student_id), invited_by: parseInt(invited_by), role_title: role_title || 'Member', status: status || 'Pending', created_at: new Date().toISOString() };
+      invitationsStore.set(newId, invObj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO projects')) {
+      const [team_id, owner_id, title, description, skills_used, status, demo_url, repo_url, outcome, is_showcase] = params;
+      const proj = { id: newId, team_id: team_id ? parseInt(team_id) : null, owner_id: parseInt(owner_id), title, description, skills_used: skills_used || '[]', status: status || 'Completed', demo_url: demo_url || '', repo_url: repo_url || '', outcome: outcome || '', is_showcase: is_showcase ? 1 : 0, created_at: new Date().toISOString() };
+      projectsStore.set(newId, proj);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO notifications')) {
+      const [user_id, title, message, type, related_entity_type, related_entity_id] = params;
+      const uId = parseInt(user_id);
+      const nList = notificationsStore.get(uId) || [];
+      nList.unshift({ id: newId, user_id: uId, title, message, type, related_entity_type: related_entity_type || '', related_entity_id: related_entity_id || 0, is_read: 0, created_at: new Date().toISOString() });
+      notificationsStore.get(uId, nList);
+      return { lastID: newId, changes: 1 };
+    }
+
+    if (sql.includes('INSERT INTO team_messages')) {
+      const [team_id, sender_id, message] = params;
+      const tId = parseInt(team_id);
+      const mList = messagesStore.get(tId) || [];
+      const msgObj = { id: newId, team_id: tId, sender_id: parseInt(sender_id), message, created_at: new Date().toISOString() };
+      mList.push(msgObj);
+      messagesStore.set(tId, mList);
+      return { lastID: newId, changes: 1 };
+    }
+
+    return { lastID: newId, changes: 1 };
+  } catch (err) {
+    console.error('Run error:', err);
+    return { lastID: Date.now(), changes: 0 };
+  }
+}
 
 export function registerUserInMemory(user) {
-  if (!user) return;
-  if (user.email) {
-    memoryUsers.set(user.email.toLowerCase().trim(), user);
-  }
-  if (user.id) {
-    memoryUsers.set(`id_${user.id}`, user);
-  }
+  if (!user || !user.id) return;
+  usersStore.set(user.id, user);
+  if (user.email) usersStore.set(user.email.toLowerCase().trim(), user);
 }
 
 export function registerProfileInMemory(profile) {
   if (!profile || !profile.user_id) return;
-  memoryProfiles.set(profile.user_id, profile);
+  profilesStore.set(profile.user_id, profile);
 }
 
-let isInitialized = false;
+let isDbSeeded = false;
 
 export async function initDb() {
-  if (isInitialized) return;
+  if (isDbSeeded) return;
 
-  await run('PRAGMA foreign_keys = ON;');
-  await checkSupabaseConnection();
-
-  // Users Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'STUDENT',
-      onboarded INTEGER NOT NULL DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // Profiles Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS profiles (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL UNIQUE,
-      full_name TEXT NOT NULL,
-      college TEXT NOT NULL,
-      year_of_study TEXT NOT NULL,
-      branch TEXT NOT NULL,
-      bio TEXT DEFAULT '',
-      skills TEXT DEFAULT '[]',
-      interests TEXT DEFAULT '[]',
-      is_open_to_teams INTEGER DEFAULT 1,
-      avatar_url TEXT DEFAULT '',
-      github_url TEXT DEFAULT '',
-      linkedin_url TEXT DEFAULT '',
-      portfolio_url TEXT DEFAULT '',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Colleges Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS colleges (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
-      city TEXT DEFAULT '',
-      state TEXT DEFAULT ''
-    );
-  `);
-
-  // Opportunities Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS opportunities (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      slug TEXT NOT NULL UNIQUE,
-      organizer TEXT NOT NULL,
-      short_description TEXT NOT NULL,
-      description TEXT NOT NULL,
-      type TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'Published',
-      location TEXT DEFAULT 'Virtual',
-      start_date TEXT DEFAULT '',
-      end_date TEXT DEFAULT '',
-      participation_mode TEXT NOT NULL DEFAULT 'Team',
-      created_by INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // Opportunity Rules Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS opportunity_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      opportunity_id INTEGER NOT NULL UNIQUE,
-      min_team_size INTEGER DEFAULT 1,
-      max_team_size INTEGER DEFAULT 10,
-      exact_team_size INTEGER,
-      composition_rules TEXT DEFAULT '[]',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Teams Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS teams (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      purpose TEXT NOT NULL,
-      opportunity_id INTEGER,
-      project_name TEXT NOT NULL,
-      project_description TEXT DEFAULT '',
-      required_skills TEXT DEFAULT '[]',
-      required_roles TEXT DEFAULT '[]',
-      leader_id INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'Recruiting',
-      github_link TEXT DEFAULT '',
-      figma_link TEXT DEFAULT '',
-      demo_link TEXT DEFAULT '',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(leader_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE SET NULL
-    );
-  `);
-
-  // Team Members Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS team_members (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER NOT NULL,
-      user_id INTEGER NOT NULL,
-      role_title TEXT NOT NULL DEFAULT 'Member',
-      joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(team_id, user_id),
-      FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Join Requests Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS join_requests (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER NOT NULL,
-      applicant_id INTEGER NOT NULL,
-      message TEXT DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'Pending',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE,
-      FOREIGN KEY(applicant_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Invitations Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS invitations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER NOT NULL,
-      student_id INTEGER NOT NULL,
-      invited_by INTEGER NOT NULL,
-      role_title TEXT DEFAULT 'Member',
-      status TEXT NOT NULL DEFAULT 'Pending',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE,
-      FOREIGN KEY(student_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY(invited_by) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Projects Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS projects (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER,
-      owner_id INTEGER NOT NULL,
-      title TEXT NOT NULL,
-      description TEXT NOT NULL,
-      skills_used TEXT DEFAULT '[]',
-      status TEXT NOT NULL DEFAULT 'Building',
-      demo_url TEXT DEFAULT '',
-      repo_url TEXT DEFAULT '',
-      outcome TEXT DEFAULT '',
-      is_showcase INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Notifications Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS notifications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      title TEXT NOT NULL,
-      message TEXT NOT NULL,
-      type TEXT NOT NULL,
-      related_entity_type TEXT DEFAULT '',
-      related_entity_id INTEGER DEFAULT 0,
-      is_read INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // Team Messages Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS team_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER NOT NULL,
-      sender_id INTEGER NOT NULL,
-      message TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE,
-      FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  await seedData();
-  isInitialized = true;
-}
-
-async function seedData() {
-  const existingColleges = await get('SELECT COUNT(*) as count FROM colleges');
-  if (!existingColleges || existingColleges.count === 0) {
-    const defaultColleges = [
-      'Stanford University',
-      'Massachusetts Institute of Technology',
-      'Carnegie Mellon University',
-      'UC Berkeley',
-      'Harvard University',
-      'Indian Institute of Technology Bombay',
-      'Indian Institute of Technology Delhi',
-      'National University of Singapore',
-      'Georgia Institute of Technology',
-      'University of Oxford',
-      'Thadomal Shahani Engineering College'
-    ];
-    for (const name of defaultColleges) {
-      await run('INSERT INTO colleges (name) VALUES (?)', [name]);
-    }
+  // Seed default colleges
+  const defaultColleges = [
+    'Stanford University',
+    'Massachusetts Institute of Technology',
+    'Carnegie Mellon University',
+    'UC Berkeley',
+    'Harvard University',
+    'Indian Institute of Technology Bombay',
+    'Indian Institute of Technology Delhi',
+    'National University of Singapore',
+    'Georgia Institute of Technology',
+    'University of Oxford',
+    'Thadomal Shahani Engineering College'
+  ];
+  let cid = 1;
+  for (const name of defaultColleges) {
+    collegesStore.set(cid, { id: cid, name });
+    cid++;
   }
 
-  const existingUsers = await get('SELECT COUNT(*) as count FROM users');
-  if (!existingUsers || existingUsers.count === 0) {
-    const passwordHash = await bcrypt.hash('Password123!', 10);
+  // Seed admin user
+  const passwordHash = await bcrypt.hash('Password123!', 10);
+  const adminObj = { id: 1, email: 'admin@teamsync.edu', password_hash: passwordHash, role: 'ADMIN', onboarded: 1, created_at: new Date().toISOString() };
+  usersStore.set(1, adminObj);
+  usersStore.set('admin@teamsync.edu', adminObj);
+  profilesStore.set(1, { id: 1, user_id: 1, full_name: 'Platform Administrator', college: 'Stanford University', year_of_study: 'Other', branch: 'Computer Science', bio: 'Platform Manager', skills: JSON.stringify(['Admin', 'Moderation']), interests: JSON.stringify(['Hackathons']) });
 
-    // Admin user
-    const adminResult = await run(
-      `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
-      ['admin@teamsync.edu', passwordHash, 'ADMIN', 1]
-    );
-    const adminObj = { id: adminResult.lastID, email: 'admin@teamsync.edu', password_hash: passwordHash, role: 'ADMIN', onboarded: 1 };
-    registerUserInMemory(adminObj);
+  // Seed Demo Student: Alex Rivera
+  const alexObj = { id: 2, email: 'alex@mit.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1, created_at: new Date().toISOString() };
+  usersStore.set(2, alexObj);
+  usersStore.set('alex@mit.edu', alexObj);
+  profilesStore.set(2, { id: 2, user_id: 2, full_name: 'Alex Rivera', college: 'Massachusetts Institute of Technology', year_of_study: '2nd Year', branch: 'Computer Science & Engineering', bio: 'Passionate full-stack developer interested in distributed systems.', skills: JSON.stringify(['React', 'Node.js', 'TypeScript', 'PostgreSQL']), interests: JSON.stringify(['Hackathons', 'Web Apps']), is_open_to_teams: 1, github_url: 'https://github.com' });
 
-    await run(
-      `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        adminResult.lastID,
-        'Platform Administrator',
-        'Stanford University',
-        'Other',
-        'Computer Science',
-        'TeamSync Platform Manager',
-        JSON.stringify(['Administration', 'Moderation', 'Event Management']),
-        JSON.stringify(['Hackathons', 'Student Building'])
-      ]
-    );
+  // Seed Demo Student: Priya Sharma
+  const priyaObj = { id: 3, email: 'priya@stanford.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1, created_at: new Date().toISOString() };
+  usersStore.set(3, priyaObj);
+  usersStore.set('priya@stanford.edu', priyaObj);
+  profilesStore.set(3, { id: 3, user_id: 3, full_name: 'Priya Sharma', college: 'Stanford University', year_of_study: '2nd Year', branch: 'Artificial Intelligence & Data Science', bio: 'Machine learning enthusiast working on NLP models.', skills: JSON.stringify(['Python', 'PyTorch', 'Figma', 'React']), interests: JSON.stringify(['AI/ML', 'Design']), is_open_to_teams: 1, github_url: 'https://github.com' });
 
-    // Demo Students
-    const student1 = await run(
-      `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
-      ['alex@mit.edu', passwordHash, 'STUDENT', 1]
-    );
-    const s1Obj = { id: student1.lastID, email: 'alex@mit.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1 };
-    registerUserInMemory(s1Obj);
+  // Seed Demo Student: David Chen
+  const davidObj = { id: 4, email: 'dev@cmu.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1, created_at: new Date().toISOString() };
+  usersStore.set(4, davidObj);
+  usersStore.set('dev@cmu.edu', davidObj);
+  profilesStore.set(4, { id: 4, user_id: 4, full_name: 'David Chen', college: 'Carnegie Mellon University', year_of_study: '3rd Year', branch: 'Software Engineering', bio: 'Backend systems engineer focusing on high throughput databases.', skills: JSON.stringify(['Go', 'Docker', 'Kubernetes']), interests: JSON.stringify(['Cloud Systems']), is_open_to_teams: 1 });
 
-    await run(
-      `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams, github_url, linkedin_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        student1.lastID,
-        'Alex Rivera',
-        'Massachusetts Institute of Technology',
-        '2nd Year',
-        'Computer Science & Engineering',
-        'Passionate full-stack developer interested in distributed systems and hackathons.',
-        JSON.stringify(['React', 'Node.js', 'TypeScript', 'PostgreSQL', 'Express']),
-        JSON.stringify(['Hackathons', 'Web Apps', 'Open Source']),
-        1,
-        'https://github.com',
-        'https://linkedin.com'
-      ]
-    );
+  // Seed Demo Student: Samantha Taylor
+  const samObj = { id: 5, email: 'sam@berkeley.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1, created_at: new Date().toISOString() };
+  usersStore.set(5, samObj);
+  usersStore.set('sam@berkeley.edu', samObj);
+  profilesStore.set(5, { id: 5, user_id: 5, full_name: 'Samantha Taylor', college: 'UC Berkeley', year_of_study: '3rd Year', branch: 'Electrical Engineering & Computer Science', bio: 'Product designer creating accessible interfaces.', skills: JSON.stringify(['Figma', 'React', 'CSS/Tailwind']), interests: JSON.stringify(['Design', 'Accessibility']), is_open_to_teams: 1 });
 
-    const student2 = await run(
-      `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
-      ['priya@stanford.edu', passwordHash, 'STUDENT', 1]
-    );
-    const s2Obj = { id: student2.lastID, email: 'priya@stanford.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1 };
-    registerUserInMemory(s2Obj);
+  // Seed Demo Opportunities
+  opportunitiesStore.set(1, { id: 1, title: 'Campus HackX 2026', slug: 'campus-hackx-2026', organizer: 'MIT Innovation Initiative', short_description: 'Annual inter-college hackathon to build high-impact real-world solutions.', description: 'Campus HackX brings together student developers to build software products in 36 hours.', type: 'Hackathon', status: 'Ongoing', location: 'Hybrid / Online', start_date: '2026-10-10', end_date: '2026-10-12', participation_mode: 'Team', created_by: 1 });
+  rulesStore.set(1, { id: 1, opportunity_id: 1, min_team_size: 4, max_team_size: 4, exact_team_size: 4, composition_rules: JSON.stringify([{ attribute: 'year_of_study', operator: 'exact', value: '2nd Year', count: 2 }, { attribute: 'year_of_study', operator: 'exact', value: '3rd Year', count: 2 }]) });
 
-    await run(
-      `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams, github_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        student2.lastID,
-        'Priya Sharma',
-        'Stanford University',
-        '2nd Year',
-        'Artificial Intelligence & Data Science',
-        'Machine learning enthusiast working on NLP models and UI design.',
-        JSON.stringify(['Python', 'PyTorch', 'Figma', 'React', 'FastAPI']),
-        JSON.stringify(['AI/ML', 'Design', 'Product Design']),
-        1,
-        'https://github.com'
-      ]
-    );
+  opportunitiesStore.set(2, { id: 2, title: 'Global Builder Sprint', slug: 'global-builder-sprint', organizer: 'Stanford E-Cell', short_description: 'Global student sprint for climate tech and sustainable software ideas.', description: 'Collaborate with global peers to pitch and showcase sustainable tech projects.', type: 'Competition', status: 'Upcoming', location: 'Virtual', start_date: '2026-11-01', end_date: '2026-11-15', participation_mode: 'Team', created_by: 1 });
+  rulesStore.set(2, { id: 2, opportunity_id: 2, min_team_size: 2, max_team_size: 5, exact_team_size: null, composition_rules: '[]' });
 
-    const student3 = await run(
-      `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
-      ['dev@cmu.edu', passwordHash, 'STUDENT', 1]
-    );
-    registerUserInMemory({ id: student3.lastID, email: 'dev@cmu.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1 });
+  opportunitiesStore.set(3, { id: 3, title: 'Student Showcase Summit', slug: 'student-showcase-summit', organizer: 'TeamSync Network', short_description: 'Showcase your semester projects to mentors and student founders.', description: 'Submit completed personal, course, or hackathon projects for feedback.', type: 'Challenge', status: 'Published', location: 'Virtual', start_date: '2026-12-01', end_date: '2026-12-05', participation_mode: 'Optional', created_by: 1 });
+  rulesStore.set(3, { id: 3, opportunity_id: 3, min_team_size: 1, max_team_size: 6, exact_team_size: null, composition_rules: '[]' });
 
-    await run(
-      `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        student3.lastID,
-        'David Chen',
-        'Carnegie Mellon University',
-        '3rd Year',
-        'Software Engineering',
-        'Backend systems engineer focusing on high throughput databases.',
-        JSON.stringify(['Go', 'Docker', 'Kubernetes', 'C++', 'Redis']),
-        JSON.stringify(['Cloud Systems', 'Security', 'Hackathons']),
-        1
-      ]
-    );
+  // Seed Demo Teams
+  teamsStore.set(1, { id: 1, name: 'Team Nova', purpose: 'Hackathon', opportunity_id: 1, project_name: 'EcoTrack AI', project_description: 'Smart campus energy monitoring system using real-time analytics.', required_skills: JSON.stringify(['React', 'Node.js', 'Python']), required_roles: JSON.stringify(['Backend Developer', '3rd Year Student']), leader_id: 2, status: 'Recruiting', github_link: 'https://github.com/example/ecotrack', figma_link: 'https://figma.com/example/ecotrack' });
+  membersStore.set(1, [
+    { membership_id: 1, team_id: 1, user_id: 2, role_title: 'Team Leader / Frontend', full_name: 'Alex Rivera', college: 'Massachusetts Institute of Technology', year_of_study: '2nd Year', branch: 'Computer Science & Engineering' },
+    { membership_id: 2, team_id: 1, user_id: 3, role_title: 'AI/ML Specialist', full_name: 'Priya Sharma', college: 'Stanford University', year_of_study: '2nd Year', branch: 'Artificial Intelligence & Data Science' }
+  ]);
 
-    const student4 = await run(
-      `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
-      ['sam@berkeley.edu', passwordHash, 'STUDENT', 1]
-    );
-    registerUserInMemory({ id: student4.lastID, email: 'sam@berkeley.edu', password_hash: passwordHash, role: 'STUDENT', onboarded: 1 });
+  teamsStore.set(2, { id: 2, name: 'DevPulse Studio', purpose: 'Personal Project', opportunity_id: null, project_name: 'DevPulse', project_description: 'Open-source telemetry monitor for developer productivity metrics.', required_skills: JSON.stringify(['Go', 'Docker', 'React']), required_roles: JSON.stringify(['UI/UX Designer']), leader_id: 4, status: 'Recruiting', github_link: 'https://github.com/example/devpulse' });
+  membersStore.set(2, [
+    { membership_id: 3, team_id: 2, user_id: 4, role_title: 'Team Leader / Systems Engineer', full_name: 'David Chen', college: 'Carnegie Mellon University', year_of_study: '3rd Year', branch: 'Software Engineering' }
+  ]);
 
-    await run(
-      `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        student4.lastID,
-        'Samantha Taylor',
-        'UC Berkeley',
-        '3rd Year',
-        'Electrical Engineering & Computer Science',
-        'Product designer and frontend engineer creating accessible interfaces.',
-        JSON.stringify(['Figma', 'CSS/Tailwind', 'React', 'UX Research']),
-        JSON.stringify(['Design', 'Accessibility', 'Mobile Apps']),
-        1
-      ]
-    );
+  // Seed Demo Join Request
+  requestsStore.set(1, { id: 1, team_id: 1, applicant_id: 5, message: 'Hi Alex! I would love to join Team Nova as UI/UX designer.', status: 'Pending', created_at: new Date().toISOString() });
 
-    // Seed Opportunities
-    const opp1 = await run(
-      `INSERT INTO opportunities (title, slug, organizer, short_description, description, type, status, location, start_date, end_date, participation_mode, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        'Campus HackX 2026',
-        'campus-hackx-2026',
-        'MIT Innovation Initiative',
-        'Annual inter-college hackathon to build high-impact real-world solutions.',
-        'Campus HackX 2026 brings together cross-college student developers to build software products in 36 hours.',
-        'Hackathon',
-        'Ongoing',
-        'Hybrid / Online',
-        '2026-10-10',
-        '2026-10-12',
-        'Team',
-        adminResult.lastID
-      ]
-    );
-    await run(
-      `INSERT INTO opportunity_rules (opportunity_id, min_team_size, max_team_size, exact_team_size, composition_rules) VALUES (?, ?, ?, ?, ?)`,
-      [
-        opp1.lastID,
-        4,
-        4,
-        4,
-        JSON.stringify([
-          { attribute: 'year_of_study', operator: 'exact', value: '2nd Year', count: 2 },
-          { attribute: 'year_of_study', operator: 'exact', value: '3rd Year', count: 2 }
-        ])
-      ]
-    );
+  // Seed Demo Project
+  projectsStore.set(1, { id: 1, team_id: null, owner_id: 2, title: 'StudyFlow Platform', description: 'Collaborative study notes web application for college courses.', skills_used: JSON.stringify(['React', 'Node.js', 'SQLite']), status: 'Completed', demo_url: 'https://studyflow-demo.vercel.app', repo_url: 'https://github.com/alex/studyflow', outcome: 'Used by 400+ students.', is_showcase: 1, created_at: new Date().toISOString() });
 
-    const opp2 = await run(
-      `INSERT INTO opportunities (title, slug, organizer, short_description, description, type, status, location, start_date, end_date, participation_mode, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        'Global Builder Sprint',
-        'global-builder-sprint',
-        'Stanford E-Cell',
-        'Global student sprint for climate tech and sustainable software ideas.',
-        'Collaborate with global peers to pitch, prototype, and showcase sustainable tech projects.',
-        'Competition',
-        'Upcoming',
-        'Virtual',
-        '2026-11-01',
-        '2026-11-15',
-        'Team',
-        adminResult.lastID
-      ]
-    );
-    await run(
-      `INSERT INTO opportunity_rules (opportunity_id, min_team_size, max_team_size, exact_team_size, composition_rules) VALUES (?, ?, ?, ?, ?)`,
-      [opp2.lastID, 2, 5, null, JSON.stringify([])]
-    );
+  // Seed Demo Notification
+  notificationsStore.set(2, [
+    { id: 1, user_id: 2, title: 'New Join Request', message: 'Samantha Taylor requested to join Team Nova.', type: 'join_request', related_entity_type: 'team', related_entity_id: 1, is_read: 0, created_at: new Date().toISOString() }
+  ]);
 
-    const opp3 = await run(
-      `INSERT INTO opportunities (title, slug, organizer, short_description, description, type, status, location, start_date, end_date, participation_mode, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        'Student Showcase Summit',
-        'student-showcase-summit',
-        'TeamSync Network',
-        'Showcase your semester projects to mentors and student founders.',
-        'Submit completed personal, course, or hackathon projects to receive feedback and recognition.',
-        'Challenge',
-        'Published',
-        'Virtual',
-        '2026-12-01',
-        '2026-12-05',
-        'Optional',
-        adminResult.lastID
-      ]
-    );
-    await run(
-      `INSERT INTO opportunity_rules (opportunity_id, min_team_size, max_team_size, exact_team_size, composition_rules) VALUES (?, ?, ?, ?, ?)`,
-      [opp3.lastID, 1, 6, null, JSON.stringify([])]
-    );
-
-    // Seed Demo Teams
-    const team1 = await run(
-      `INSERT INTO teams (name, purpose, opportunity_id, project_name, project_description, required_skills, required_roles, leader_id, status, github_link, figma_link) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        'Team Nova',
-        'Hackathon',
-        opp1.lastID,
-        'EcoTrack AI',
-        'Smart campus energy monitoring system using real-time analytics.',
-        JSON.stringify(['React', 'Node.js', 'Python', 'Data Visualization']),
-        JSON.stringify(['Backend Developer', '3rd Year Student', '3rd Year Student']),
-        student1.lastID,
-        'Recruiting',
-        'https://github.com/example/ecotrack',
-        'https://figma.com/example/ecotrack'
-      ]
-    );
-    await run(`INSERT INTO team_members (team_id, user_id, role_title) VALUES (?, ?, ?)`, [
-      team1.lastID,
-      student1.lastID,
-      'Team Leader / Frontend'
-    ]);
-    await run(`INSERT INTO team_members (team_id, user_id, role_title) VALUES (?, ?, ?)`, [
-      team1.lastID,
-      student2.lastID,
-      'AI/ML Specialist'
-    ]);
-
-    const team2 = await run(
-      `INSERT INTO teams (name, purpose, opportunity_id, project_name, project_description, required_skills, required_roles, leader_id, status, github_link) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        'DevPulse Studio',
-        'Personal Project',
-        null,
-        'DevPulse',
-        'Open-source telemetry monitor for developer productivity metrics.',
-        JSON.stringify(['Go', 'Docker', 'React', 'TimescaleDB']),
-        JSON.stringify(['UI/UX Designer', 'Frontend Developer']),
-        student3.lastID,
-        'Recruiting',
-        'https://github.com/example/devpulse'
-      ]
-    );
-    await run(`INSERT INTO team_members (team_id, user_id, role_title) VALUES (?, ?, ?)`, [
-      team2.lastID,
-      student3.lastID,
-      'Team Leader / Systems Engineer'
-    ]);
-
-    // Seed Demo Join Request
-    await run(
-      `INSERT INTO join_requests (team_id, applicant_id, message, status) VALUES (?, ?, ?, ?)`,
-      [team1.lastID, student4.lastID, 'Hi Alex! I would love to join Team Nova as UI/UX designer and frontend builder.', 'Pending']
-    );
-
-    // Seed Demo Project Showcase
-    await run(
-      `INSERT INTO projects (team_id, owner_id, title, description, skills_used, status, demo_url, repo_url, outcome, is_showcase) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        null,
-        student1.lastID,
-        'StudyFlow Platform',
-        'A collaborative flashcard and study notes web application built for college courses.',
-        JSON.stringify(['React', 'Node.js', 'SQLite', 'Tailwind CSS']),
-        'Completed',
-        'https://studyflow-demo.vercel.app',
-        'https://github.com/alex/studyflow',
-        'Used by 400+ students during finals week.',
-        1
-      ]
-    );
-
-    // Seed Demo Notification
-    await run(
-      `INSERT INTO notifications (user_id, title, message, type, related_entity_type, related_entity_id) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        student1.lastID,
-        'New Join Request',
-        'Samantha Taylor requested to join Team Nova.',
-        'join_request',
-        'team',
-        team1.lastID
-      ]
-    );
-  }
+  isDbSeeded = true;
 }
 
 export default db;
