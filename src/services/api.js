@@ -23,15 +23,27 @@ async function request(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers
+    });
+  } catch (netErr) {
+    console.error('Network connection error:', netErr);
+    throw new Error('Unable to connect to TeamSync backend server. Please make sure the backend server is running.');
+  }
 
-  const data = await response.json().catch(() => ({}));
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (e) {
+    data = {};
+  }
 
   if (!response.ok) {
-    const error = new Error(data.error || 'An error occurred during API request');
+    const errorMsg = data.error || data.message || `Server error (${response.status}: ${response.statusText})`;
+    const error = new Error(errorMsg);
     error.status = response.status;
     error.data = data;
     throw error;

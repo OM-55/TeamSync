@@ -14,11 +14,12 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
+    const cleanEmail = email.toLowerCase().trim();
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    const existingUser = await get('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [email]);
+    const existingUser = await get('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [cleanEmail]);
     if (existingUser) {
       return res.status(400).json({ error: 'An account with this email already exists' });
     }
@@ -26,19 +27,30 @@ router.post('/signup', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await run(
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, 'STUDENT', 0)`,
-      [email.toLowerCase().trim(), passwordHash]
+      [cleanEmail, passwordHash]
     );
 
-    const newUser = { id: result.lastID, email: email.toLowerCase().trim(), role: 'STUDENT', onboarded: 0 };
+    const userId = result.lastID;
+
+    // Initialize default profile shell
+    await run(
+      `INSERT OR IGNORE INTO profiles (user_id, full_name, college, year_of_study, branch) VALUES (?, ?, ?, ?, ?)`,
+      [userId, cleanEmail.split('@')[0], 'Select College', '1st Year', 'Computer Science']
+    );
+
+    const newUser = { id: userId, email: cleanEmail, role: 'STUDENT', onboarded: 0 };
+    const newProfile = await get('SELECT * FROM profiles WHERE user_id = ?', [userId]);
+
     const token = generateToken(newUser);
 
     return res.status(201).json({
       message: 'Account created successfully',
       token,
-      user: newUser
+      user: newUser,
+      profile: newProfile
     });
   } catch (err) {
-    console.error('Signup error:', err);
+    console.error('Signup server error:', err);
     return res.status(500).json({ error: 'Server error during registration' });
   }
 });
@@ -52,7 +64,8 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = await get('SELECT id, email, password_hash, role, onboarded FROM users WHERE LOWER(email) = LOWER(?)', [email]);
+    const cleanEmail = email.toLowerCase().trim();
+    const user = await get('SELECT id, email, password_hash, role, onboarded FROM users WHERE LOWER(email) = LOWER(?)', [cleanEmail]);
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
