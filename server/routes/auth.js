@@ -1,6 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import { get, run, cacheUser, cacheProfile } from '../db.js';
+import { get, run, registerUserInMemory, registerProfileInMemory } from '../db.js';
 import { generateToken, requireAuth } from '../authMiddleware.js';
 
 const router = express.Router();
@@ -38,19 +38,19 @@ router.post('/signup', async (req, res) => {
       [userId, cleanEmail.split('@')[0], 'Select College', '1st Year', 'Computer Science']
     );
 
-    const newUser = { id: userId, email: cleanEmail, role: 'STUDENT', onboarded: 0 };
+    const newUser = { id: userId, email: cleanEmail, password_hash: passwordHash, role: 'STUDENT', onboarded: 0 };
     const newProfile = await get('SELECT * FROM profiles WHERE user_id = ?', [userId]);
 
-    // Cache user and profile in persistent memory
-    cacheUser(newUser);
-    cacheProfile(newProfile);
+    // Register user and profile in memory map
+    registerUserInMemory(newUser);
+    registerProfileInMemory(newProfile);
 
     const token = generateToken(newUser);
 
     return res.status(201).json({
       message: 'Account created successfully',
       token,
-      user: newUser,
+      user: { id: newUser.id, email: newUser.email, role: newUser.role, onboarded: newUser.onboarded },
       profile: newProfile
     });
   } catch (err) {
@@ -88,8 +88,8 @@ router.post('/login', async (req, res) => {
       onboarded: user.onboarded
     };
 
-    cacheUser(sessionUser);
-    cacheProfile(profile);
+    registerUserInMemory({ ...sessionUser, password_hash: user.password_hash });
+    registerProfileInMemory(profile);
 
     const token = generateToken(sessionUser);
     return res.json({
@@ -108,8 +108,8 @@ router.post('/login', async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const profile = await get('SELECT * FROM profiles WHERE user_id = ?', [req.user.id]);
-    cacheUser(req.user);
-    cacheProfile(profile);
+    registerUserInMemory(req.user);
+    registerProfileInMemory(profile);
     return res.json({
       user: req.user,
       profile
