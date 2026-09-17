@@ -1,6 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import { get, run } from '../db.js';
+import { get, run, cacheUser, cacheProfile } from '../db.js';
 import { generateToken, requireAuth } from '../authMiddleware.js';
 
 const router = express.Router();
@@ -41,6 +41,10 @@ router.post('/signup', async (req, res) => {
     const newUser = { id: userId, email: cleanEmail, role: 'STUDENT', onboarded: 0 };
     const newProfile = await get('SELECT * FROM profiles WHERE user_id = ?', [userId]);
 
+    // Cache user and profile in persistent memory
+    cacheUser(newUser);
+    cacheProfile(newProfile);
+
     const token = generateToken(newUser);
 
     return res.status(201).json({
@@ -77,16 +81,21 @@ router.post('/login', async (req, res) => {
 
     const profile = await get('SELECT * FROM profiles WHERE user_id = ?', [user.id]);
 
-    const token = generateToken(user);
+    const sessionUser = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      onboarded: user.onboarded
+    };
+
+    cacheUser(sessionUser);
+    cacheProfile(profile);
+
+    const token = generateToken(sessionUser);
     return res.json({
       message: 'Logged in successfully',
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        onboarded: user.onboarded
-      },
+      user: sessionUser,
       profile
     });
   } catch (err) {
@@ -99,6 +108,8 @@ router.post('/login', async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const profile = await get('SELECT * FROM profiles WHERE user_id = ?', [req.user.id]);
+    cacheUser(req.user);
+    cacheProfile(profile);
     return res.json({
       user: req.user,
       profile

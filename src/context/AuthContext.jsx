@@ -24,7 +24,7 @@ export function AuthProvider({ children }) {
       setUser(data.user);
       setProfile(data.profile);
     } catch (err) {
-      console.error('Session restoration failed:', err);
+      console.error('Session verification failed:', err);
       setAuthToken(null);
       setUser(null);
       setProfile(null);
@@ -39,9 +39,7 @@ export function AuthProvider({ children }) {
       const data = await api.getNotifications();
       setNotifications(data.notifications || []);
       setUnreadNotificationsCount(data.unreadCount || 0);
-    } catch (err) {
-      // Silent error for notifications background poll
-    }
+    } catch (err) {}
   }, [user]);
 
   useEffect(() => {
@@ -51,7 +49,7 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (user) {
       fetchNotifications();
-      const interval = setInterval(fetchNotifications, 15000); // 15s quiet update
+      const interval = setInterval(fetchNotifications, 15000);
       return () => clearInterval(interval);
     }
   }, [user, fetchNotifications]);
@@ -68,7 +66,7 @@ export function AuthProvider({ children }) {
     const data = await api.signup({ email, password });
     setAuthToken(data.token);
     setUser(data.user);
-    setProfile(null);
+    setProfile(data.profile || null);
     return data;
   };
 
@@ -81,10 +79,17 @@ export function AuthProvider({ children }) {
   };
 
   const completeOnboarding = async (onboardingData) => {
-    const data = await api.onboard(onboardingData);
-    setUser(data.user);
-    setProfile(data.profile);
-    return data;
+    try {
+      const data = await api.onboard(onboardingData);
+      setUser(data.user);
+      setProfile(data.profile);
+      return data;
+    } catch (err) {
+      if (err.message && err.message.includes('no longer exists')) {
+        logout();
+      }
+      throw err;
+    }
   };
 
   const updateProfileState = (updatedProfile) => {

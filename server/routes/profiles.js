@@ -1,5 +1,5 @@
 import express from 'express';
-import { get, query, run } from '../db.js';
+import { get, query, run, cacheUser, cacheProfile } from '../db.js';
 import { requireAuth } from '../authMiddleware.js';
 
 const router = express.Router();
@@ -44,8 +44,14 @@ router.post('/onboard', requireAuth, async (req, res) => {
 
     await run('UPDATE users SET onboarded = 1 WHERE id = ?', [req.user.id]);
 
-    const updatedUser = await get('SELECT id, email, role, onboarded FROM users WHERE id = ?', [req.user.id]);
+    const updatedUser = await get('SELECT id, email, role, onboarded FROM users WHERE id = ?', [req.user.id]) || {
+      ...req.user,
+      onboarded: 1
+    };
     const updatedProfile = await get('SELECT * FROM profiles WHERE user_id = ?', [req.user.id]);
+
+    cacheUser(updatedUser);
+    cacheProfile(updatedProfile);
 
     return res.json({
       message: 'Onboarding completed successfully',
@@ -110,6 +116,7 @@ router.put('/me', requireAuth, async (req, res) => {
     );
 
     const updatedProfile = await get('SELECT * FROM profiles WHERE user_id = ?', [req.user.id]);
+    cacheProfile(updatedProfile);
     return res.json(updatedProfile);
   } catch (err) {
     console.error('Update profile error:', err);
@@ -125,7 +132,6 @@ router.get('/:userId', async (req, res) => {
       return res.status(404).json({ error: 'Student profile not found' });
     }
 
-    // Also fetch showcase projects & active teams
     const showcaseProjects = await query(
       'SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at DESC',
       [req.params.userId]

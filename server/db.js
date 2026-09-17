@@ -10,12 +10,16 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// On Vercel serverless environment, use /tmp writable directory
+// Ephemeral /tmp database path for Vercel Serverless Functions
 const isVercel = Boolean(process.env.VERCEL);
 const dbPath = isVercel ? '/tmp/teamsync.db' : path.resolve(__dirname, '../teamsync.db');
 
 const verboseSqlite = sqlite3.verbose();
 const db = new verboseSqlite.Database(dbPath);
+
+// Global persistent in-memory caches to preserve user sessions across Vercel invocations
+const usersCache = new Map(); // id -> user, email -> user
+const profilesCache = new Map(); // user_id -> profile
 
 export const query = (sql, params = []) => {
   return new Promise((resolve, reject) => {
@@ -35,7 +39,31 @@ export const run = (sql, params = []) => {
   });
 };
 
-export const get = (sql, params = []) => {
+export const get = async (sql, params = []) => {
+  // 1. Intercept User Lookup by ID to prevent "User no longer exists" on serverless container switches
+  if (sql.includes('FROM users WHERE id =')) {
+    const userId = parseInt(params[0]);
+    if (usersCache.has(userId)) {
+      return usersCache.get(userId);
+    }
+  }
+
+  // 2. Intercept User Lookup by Email
+  if (sql.includes('FROM users WHERE LOWER(email) = LOWER(?)')) {
+    const emailKey = String(params[0]).toLowerCase().trim();
+    if (usersCache.has(emailKey)) {
+      return usersCache.get(emailKey);
+    }
+  }
+
+  // 3. Intercept Profile Lookup by user_id
+  if (sql.includes('FROM profiles WHERE user_id =')) {
+    const userId = parseInt(params[0]);
+    if (profilesCache.has(userId)) {
+      return profilesCache.get(userId);
+    }
+  }
+
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) reject(err);
@@ -44,14 +72,28 @@ export const get = (sql, params = []) => {
   });
 };
 
+// Cache Helper Functions
+export function cacheUser(user) {
+  if (!user || !user.id) return;
+  usersCache.set(user.id, user);
+  if (user.email) {
+    usersCache.set(user.email.toLowerCase().trim(), user);
+  }
+}
+
+export function cacheProfile(profile) {
+  if (!profile || !profile.user_id) return;
+  profilesCache.set(profile.user_id, profile);
+}
+
 let dbInitialized = false;
 
 export async function initDb() {
   if (dbInitialized) return;
-  
+
   await run('PRAGMA foreign_keys = ON;');
 
-  // Check & verify Supabase Connection
+  // Verify Supabase Connection
   await checkSupabaseConnection();
 
   // Users Table
@@ -267,7 +309,8 @@ async function seedData() {
       'Indian Institute of Technology Delhi',
       'National University of Singapore',
       'Georgia Institute of Technology',
-      'University of Oxford'
+      'University of Oxford',
+      'Thadomal Shahani Engineering College'
     ];
     for (const name of defaultColleges) {
       await run('INSERT INTO colleges (name) VALUES (?)', [name]);
@@ -283,6 +326,9 @@ async function seedData() {
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
       ['admin@teamsync.edu', passwordHash, 'ADMIN', 1]
     );
+    const adminObj = { id: adminResult.lastID, email: 'admin@teamsync.edu', role: 'ADMIN', onboarded: 1 };
+    cacheUser(adminObj);
+
     await run(
       `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -302,6 +348,9 @@ async function seedData() {
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
       ['alex@mit.edu', passwordHash, 'STUDENT', 1]
     );
+    const s1Obj = { id: student1.lastID, email: 'alex@mit.edu', role: 'STUDENT', onboarded: 1 };
+    cacheUser(s1Obj);
+
     await run(
       `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams, github_url, linkedin_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -323,6 +372,9 @@ async function seedData() {
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
       ['priya@stanford.edu', passwordHash, 'STUDENT', 1]
     );
+    const s2Obj = { id: student2.lastID, email: 'priya@stanford.edu', role: 'STUDENT', onboarded: 1 };
+    cacheUser(s2Obj);
+
     await run(
       `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams, github_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -343,6 +395,8 @@ async function seedData() {
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
       ['dev@cmu.edu', passwordHash, 'STUDENT', 1]
     );
+    cacheUser({ id: student3.lastID, email: 'dev@cmu.edu', role: 'STUDENT', onboarded: 1 });
+
     await run(
       `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -362,6 +416,8 @@ async function seedData() {
       `INSERT INTO users (email, password_hash, role, onboarded) VALUES (?, ?, ?, ?)`,
       ['sam@berkeley.edu', passwordHash, 'STUDENT', 1]
     );
+    cacheUser({ id: student4.lastID, email: 'sam@berkeley.edu', role: 'STUDENT', onboarded: 1 });
+
     await run(
       `INSERT INTO profiles (user_id, full_name, college, year_of_study, branch, bio, skills, interests, is_open_to_teams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
