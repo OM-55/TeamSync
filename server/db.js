@@ -9,7 +9,10 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, '../teamsync.db');
+
+// On Vercel serverless environment, use /tmp writable directory
+const isVercel = Boolean(process.env.VERCEL);
+const dbPath = isVercel ? '/tmp/teamsync.db' : path.resolve(__dirname, '../teamsync.db');
 
 const verboseSqlite = sqlite3.verbose();
 const db = new verboseSqlite.Database(dbPath);
@@ -41,7 +44,11 @@ export const get = (sql, params = []) => {
   });
 };
 
+let dbInitialized = false;
+
 export async function initDb() {
+  if (dbInitialized) return;
+  
   await run('PRAGMA foreign_keys = ON;');
 
   // Check & verify Supabase Connection
@@ -244,6 +251,7 @@ export async function initDb() {
   `);
 
   await seedData();
+  dbInitialized = true;
 }
 
 async function seedData() {
