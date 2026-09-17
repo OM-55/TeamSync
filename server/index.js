@@ -53,8 +53,8 @@ async function startServer() {
   try {
     await initDb();
     console.log('Database initialized successfully.');
-    app.listen(PORT, () => {
-      console.log(`TeamSync API Server running on http://localhost:${PORT}`);
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`TeamSync API Server running on http://127.0.0.1:${PORT}`);
     });
   } catch (err) {
     console.error('Failed to initialize database or start server:', err);

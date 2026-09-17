@@ -1,4 +1,5 @@
 const API_BASE = '/api';
+const DIRECT_API_FALLBACK = 'http://127.0.0.1:5000/api';
 
 export function getAuthToken() {
   return localStorage.getItem('teamsync_token');
@@ -29,9 +30,29 @@ async function request(endpoint, options = {}) {
       ...options,
       headers
     });
+
+    // If Vite proxy returns 404 because backend is on 127.0.0.1:5000 directly, try fallback URL
+    if (response.status === 404) {
+      try {
+        const directRes = await fetch(`${DIRECT_API_FALLBACK}${endpoint}`, {
+          ...options,
+          headers
+        });
+        if (directRes.ok || directRes.status !== 404) {
+          response = directRes;
+        }
+      } catch (fallbackErr) {}
+    }
   } catch (netErr) {
-    console.error('Network connection error:', netErr);
-    throw new Error('Unable to connect to TeamSync backend server. Please make sure the backend server is running.');
+    try {
+      response = await fetch(`${DIRECT_API_FALLBACK}${endpoint}`, {
+        ...options,
+        headers
+      });
+    } catch (directErr) {
+      console.error('Network connection error:', netErr);
+      throw new Error('Unable to connect to TeamSync backend server. Please make sure the server is running (node server/index.js).');
+    }
   }
 
   let data = {};
